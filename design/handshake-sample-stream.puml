@@ -1,0 +1,43 @@
+@startuml handshake_vs_samples
+skinparam rectangle {
+  FontSize 11
+}
+skinparam sequence {
+  BackgroundColor #E8F5E9
+}
+
+title UMS Protocol: Handshake vs. Sample Stream
+
+rectangle "Handshake Packet  (sent ONCE on UMS_setup)" #E8F5E9 {
+  rectangle "[uint8: var_count]" as vc #A5D6A7
+  rectangle "[string: var1_name\\0]" as n1 #C8E6C9
+  rectangle "[uint8: var1_type]" as t1 #C8E6C9
+  rectangle "[uint8: var1_size]" as s1 #C8E6C9
+  rectangle "... repeat per var ..." as rep #E0E0E0
+  vc -[hidden]right-> n1
+  n1 -[hidden]right-> t1
+  t1 -[hidden]right-> s1
+  s1 -[hidden]right-> rep
+}
+
+rectangle "Sample Packet  (sent on EVERY UMS_update)" #FFF8E1 {
+  rectangle "[uint32: timestamp]" as ts2 #FFE082
+  rectangle "[N bytes: var1]" as b1 #FFECB3
+  rectangle "[N bytes: var2]" as b2 #FFECB3
+  rectangle "[N bytes: varK]" as bk #FFECB3
+  ts2 -[hidden]right-> b1
+  b1 -[hidden]right-> b2
+  b2 -[hidden]right-> bk
+}
+
+note bottom of rep
+  Strings appear ONLY here.
+  Host parses this once and stores the layout.
+end note
+
+note bottom of bk
+  Zero strings. Zero metadata.
+  Host already knows the layout from handshake.
+  Total size fixed at registration time.
+end note
+@enduml

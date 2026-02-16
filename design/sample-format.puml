@@ -1,0 +1,37 @@
+@startuml sample_data_format
+skinparam rectangle {
+  BackgroundColor #FFF8E1
+  FontSize 11
+}
+skinparam note {
+  BackgroundColor #FFFDE7
+}
+
+title UMS Sample Format (Raw Bytes)
+
+rectangle "Sample Wire Format" {
+  rectangle "Timestamp\n(4 bytes, uint32)" as ts #FFE082
+  rectangle "var1\n(4 bytes, float)" as v1 #FFECB3
+  rectangle "var2\n(1 byte, uint8)" as v2 #FFECB3
+  rectangle "var3\n(4 bytes, float)" as v3 #FFECB3
+}
+
+ts -[hidden]right-> v1
+v1 -[hidden]right-> v2
+v2 -[hidden]right-> v3
+
+note bottom of ts
+  <b>Sample size is fixed at registration time</b>
+  Calculated once: 4 + sizeof(var1) + sizeof(var2) + sizeof(var3) = 13 bytes
+end note
+
+note bottom of v3
+  <b>Zero runtime metadata</b>
+  - No strings, no headers per sample
+  - Raw bytes only (DMA-friendly)
+
+  Example:
+  [0x12,0x34,0x56,0x78, 0x3F,0x80,0x00,0x00, 0x01, 0x40,0x00,0x00,0x00]
+   |___timestamp___|  |_____var1_____|  |v2|  |_____var3_____|
+end note
+@enduml
