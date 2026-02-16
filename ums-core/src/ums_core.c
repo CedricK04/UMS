@@ -1,220 +1,176 @@
+//
+//
+//
+
+#include "string.h"
+
+#include "ums/triple_buffer.h"
 #include "ums/ums_core.h"
-#include "ums/sampling.h"
-#include <string.h>
 
-/* Triple buffer indices */
-#define BUFFER_WRITE    0
-#define BUFFER_PENDING  1
-#define BUFFER_TRANSMIT 2
-#define NUM_BUFFERS     3
+/**
+ * triple buffer array to store the sample_packets in.
+ * During transmission, send the data on the address of the index of the array that is the write index,
+ * but calculate the size of the data in that function and only transmit the necessary length for optimization.
+ */
+sample_packet_t     ums_triple_buffer[3];
+volatile uint8_t    idx_write           = 0;
+volatile uint8_t    idx_read            = 1;
+volatile uint8_t    idx_spare           = 2;
 
-/* UMS state structure */
-typedef struct {
-    /* Configuration */
-    TransmissionInterface transmit_fn;
-    CriticalSectionEnter enter_critical;
-    CriticalSectionExit exit_critical;
-    TimeProvider time_provider;
-    
-    /* Traced variables */
-    const float* trace_vars[UMS_MAX_CHANNELS];
-    uint8_t channel_count;
-    
-    /* Triple buffering - volatile for ISR safety */
-    ums_sample_t buffers[NUM_BUFFERS];
-    volatile uint8_t write_idx;
-    volatile uint8_t pending_idx;
-    volatile uint8_t transmit_idx;
-    volatile bool transmission_active;
-    
-    /* State flags */
-    volatile bool initialized;
-    
-    /* Timestamp counter (only used when time_provider is NULL) */
-    volatile uint32_t timestamp;
-} ums_state_t;
+static transmit_function s_transmit_function_ptr;
 
-/* Static instance - single instance for minimal footprint */
-static ums_state_t ums_state = {0};
+data_channel_t      registry[UMS_MAX_CHANNELS];
+uint8_t             channel_count       = 0;
+bool                g_ums_initialized   = false;
+uint16_t            g_actual_frame_size = sizeof(uint32_t);
+volatile bool       g_dma_busy          = false;
 
-/* Helper function to enter critical section */
-static inline void enter_critical(void) {
-    if (ums_state.enter_critical != NULL) {
-        ums_state.enter_critical();
+/**
+ * Creates a new sample with the current values of the traced variables.
+ * Writes the sample packet to the write index and swaps the write index with the spare index.
+ * @return ums_err_t error code. 1 = UMS_SUCCESS.
+ */
+static ums_err_t ums_create_sample(void)
+{
+    if (channel_count == 0)
+    {
+        return UMS_RANGE_ERROR;
     }
+
+    ums_triple_buffer[idx_write].timestamp = ums_platform_get_timestamp();
+    uint16_t offset = 0;
+
+    for (uint8_t i = 0; i < channel_count; i++)
+    {
+        const uint8_t var_size = ums_datatype_size(registry[i].var_type);
+        memcpy(&ums_triple_buffer[idx_write].data[offset], registry[i].var_ptr, var_size);
+        offset += var_size;
+    }
+
+    ums_platform_enter_critical();
+    const uint8_t temp = idx_spare;
+    idx_spare = idx_write;
+    idx_write = temp;
+    ums_platform_exit_critical();
+
+    g_dma_busy = true;
+    s_transmit_function_ptr((void*)&ums_triple_buffer[idx_spare], g_actual_frame_size);
+
+    return UMS_SUCCESS;
 }
 
-/* Helper function to exit critical section */
-static inline void exit_critical(void) {
-    if (ums_state.exit_critical != NULL) {
-        ums_state.exit_critical();
+ums_err_t ums_setup(const transmit_function transmit_function_ptr)
+{
+    if (!transmit_function_ptr)
+    {
+        return UMS_NULL_POINTER;
     }
+    s_transmit_function_ptr = transmit_function_ptr;
+    g_ums_initialized = true;
+
+    return UMS_SUCCESS;
 }
 
-bool UMSSetup(const ums_core_transmission_config_t *pConfig) {
-    if (pConfig == NULL) {
-        return false;
+ums_err_t ums_trace(void *var_ptr, char *var_name_ptr, const ums_datatype_t var_type)
+{
+    if (!g_ums_initialized)
+    {
+        return UMS_NOT_INITIALIZED;
     }
-    
-    if (pConfig->transmit_fn == NULL) {
-        return false;
+    if (!var_ptr)
+    {
+        return UMS_INVALID_VARIABLE_REGISTRATION;
     }
-    
-    if (ums_state.initialized) {
-        return false; /* Already initialized */
+    if (!var_name_ptr)
+    {
+        return UMS_NULL_POINTER;
     }
-    
-    /* Initialize state */
-    memset(&ums_state, 0, sizeof(ums_state_t));
-    
-    ums_state.transmit_fn = pConfig->transmit_fn;
-    ums_state.enter_critical = pConfig->enter_critical;
-    ums_state.exit_critical = pConfig->exit_critical;
-    ums_state.time_provider = pConfig->time_provider;
-    
-    ums_state.write_idx = BUFFER_WRITE;
-    ums_state.pending_idx = BUFFER_PENDING;
-    ums_state.transmit_idx = BUFFER_TRANSMIT;
-    ums_state.transmission_active = false;
-    ums_state.timestamp = 0;
-    ums_state.channel_count = 0;
-    ums_state.initialized = true;
-    
-    return true;
+    if (ums_datatype_size(var_type) == 0)
+    {
+        return UMS_INVALID_PARAMETER;
+    }
+    if (channel_count == UMS_MAX_CHANNELS)
+    {
+        return UMS_RANGE_ERROR;
+    }
+
+    registry[channel_count].var_ptr = var_ptr;
+    registry[channel_count].var_type = var_type;
+    registry[channel_count].var_name_ptr = var_name_ptr;
+
+    channel_count++;
+    g_actual_frame_size += ums_datatype_size(var_type);
+
+    return UMS_SUCCESS;
 }
 
-bool UMSTrace(const float* pVariable) {
-    if (!ums_state.initialized) {
-        return false;
+ums_err_t ums_update(void)
+{
+    if (!g_ums_initialized)
+    {
+        return UMS_NOT_INITIALIZED;
     }
-    
-    if (pVariable == NULL) {
-        return false;
+    if (channel_count == 0)
+    {
+        return UMS_RANGE_ERROR;
     }
-    
-    if (ums_state.channel_count >= UMS_MAX_CHANNELS) {
-        return false; /* Maximum channels reached */
+    if (g_dma_busy)
+    {
+        return UMS_BUFFER_FULL;
     }
-    
-    ums_state.trace_vars[ums_state.channel_count] = pVariable;
-    ums_state.channel_count++;
-    
-    return true;
+
+    if (ums_create_sample() != UMS_SUCCESS)
+    {
+        return UMS_SAMPLING_ERROR;
+    }
+    return UMS_SUCCESS;
 }
 
-bool UMSUpdate(void) {
-    if (!ums_state.initialized) {
-        return false;
-    }
-    
-    if (ums_state.channel_count == 0) {
-        return false;
-    }
-    
-    /* Get pointer to write buffer */
-    ums_sample_t *sample = &ums_state.buffers[ums_state.write_idx];
-    
-    /* Get timestamp - either from time provider or counter */
-    uint32_t current_timestamp;
-    if (ums_state.time_provider != NULL) {
-        /* Use actual time from platform */
-        current_timestamp = ums_state.time_provider();
-    } else {
-        /* Use simple counter */
-        enter_critical();
-        current_timestamp = ums_state.timestamp++;
-        exit_critical();
-    }
-    
-    sample->timestamp = current_timestamp;
-    sample->channels = ums_state.channel_count;
-    
-    /* Copy current values from traced variables */
-    for (uint8_t i = 0; i < ums_state.channel_count; i++) {
-        sample->values[i] = *(ums_state.trace_vars[i]);
-    }
-    
-    /* CRITICAL SECTION: Atomic buffer swap */
-    enter_critical();
-    
-    /* Swap write and pending buffers */
-    uint8_t temp = ums_state.write_idx;
-    ums_state.write_idx = ums_state.pending_idx;
-    ums_state.pending_idx = temp;
-    
-    /* Check if we need to start transmission */
-    bool start_transmission = false;
-    uint8_t tx_idx = 0;
-    
-    if (!ums_state.transmission_active) {
-        ums_state.transmission_active = true;
-        start_transmission = true;
-        
-        /* Swap pending and transmit buffers */
-        temp = ums_state.pending_idx;
-        ums_state.pending_idx = ums_state.transmit_idx;
-        ums_state.transmit_idx = temp;
-        
-        tx_idx = ums_state.transmit_idx;
-    }
-    
-    exit_critical();
-    
-    /* Start transmission outside critical section */
-    if (start_transmission) {
-        ums_sample_t *tx_sample = &ums_state.buffers[tx_idx];
-        uint32_t tx_size = ums_sample_size(ums_state.channel_count);
-        ums_state.transmit_fn(tx_sample, tx_size);
-    }
-    
-    return true;
+void ums_transfer_complete_callback(void)
+{
+    const uint8_t temp = idx_spare;
+    idx_spare = idx_read;
+    idx_read = temp;
+    g_dma_busy = false;
 }
 
-void UMSTransmissionComplete(void) {
-    if (!ums_state.initialized) {
-        return;
+ums_err_t ums_destroy(void)
+{
+    if (!g_ums_initialized)
+    {
+        return UMS_NOT_INITIALIZED;
     }
-    
-    /* CRITICAL SECTION: Check and update buffer state */
-    enter_critical();
-    
-    bool start_transmission = false;
-    uint8_t tx_idx = 0;
-    
-    /* Check if pending buffer has new data (indices are different) */
-    if (ums_state.pending_idx != ums_state.transmit_idx) {
-        /* Swap pending and transmit buffers */
-        uint8_t temp = ums_state.pending_idx;
-        ums_state.pending_idx = ums_state.transmit_idx;
-        ums_state.transmit_idx = temp;
-        
-        start_transmission = true;
-        tx_idx = ums_state.transmit_idx;
-    } else {
-        /* No pending data, mark transmission as inactive */
-        ums_state.transmission_active = false;
+
+    for (uint8_t i = 0; i < channel_count; i++)
+    {
+        registry[i].var_ptr = nullptr;
+        registry[i].var_name_ptr = nullptr;
+        registry[i].var_type = 0;
     }
-    
-    exit_critical();
-    
-    /* Start next transmission outside critical section */
-    if (start_transmission) {
-        ums_sample_t *tx_sample = &ums_state.buffers[tx_idx];
-        uint32_t tx_size = ums_sample_size(ums_state.channel_count);
-        ums_state.transmit_fn(tx_sample, tx_size);
-    }
+
+    g_dma_busy = false;
+    channel_count = 0;
+    g_ums_initialized = false;
+    g_actual_frame_size = sizeof(uint32_t);
+
+    idx_write = 0;
+    idx_read = 1;
+    idx_spare = 2;
+
+    return UMS_SUCCESS;
 }
 
-void UMSDestroy(void) {
-    enter_critical();
-    memset(&ums_state, 0, sizeof(ums_state_t));
-    exit_critical();
+__attribute__((weak)) void ums_platform_enter_critical(void)
+{
+    //
 }
 
-uint8_t UMSGetChannelCount(void) {
-    return ums_state.channel_count;
+__attribute__((weak)) void ums_platform_exit_critical(void)
+{
+    //
 }
 
-bool UMSIsInitialized(void) {
-    return ums_state.initialized;
+__attribute__((weak)) uint32_t ums_platform_get_timestamp(void)
+{
+    return 0U;
 }

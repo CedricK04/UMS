@@ -1,0 +1,62 @@
+@startuml sample_pipeline
+skinparam rectangle {
+  BackgroundColor #EDE7F6
+  BorderColor #4527A0
+  FontSize 11
+}
+skinparam component {
+  BackgroundColor #F3E5F5
+}
+
+title UMS Sample Creation Pipeline (Per UMS_update() Call)
+
+rectangle "1. Timestamp" {
+  [get_timestamp] as ts
+}
+
+rectangle "2. Variable Read" {
+  [memcpy_loop] as mcpy
+}
+
+rectangle "3. Buffer Assembly" {
+  [write_timestamp] as wts
+  [append_variables] as apv
+}
+
+rectangle "4. DMA Transmit" {
+  [hal_transmit] as dma
+  [cpu_released] as cpu
+}
+
+ts -down-> mcpy
+mcpy -down-> wts
+wts -down-> apv
+apv -down-> dma
+
+note right of ts
+  ums_hal_get_timestamp()
+  returns uint32 — 4 bytes
+end note
+
+note right of mcpy
+  No type checks.
+  No branches.
+  Pointer + size only.
+end note
+
+note right of wts
+  Write timestamp to buf[0..3]
+end note
+
+note right of apv
+  Append each variable's bytes
+end note
+
+note right of dma
+  ums_hal_transmit(buf, sample_size)
+  <b>< 100 cycles total</b>
+  Zero dynamic allocation.
+  Zero type dispatch at runtime.
+  CPU released immediately (DMA).
+end note
+@enduml

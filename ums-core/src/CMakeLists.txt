@@ -6,7 +6,10 @@ set(UMS_CORE_SOURCES
 
 set(UMS_CORE_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ums/ums_core.h
-    # Add more headers here
+        ../include/ums/error.h
+        ../include/ums/datatype.h
+        ../include/ums/triple_buffer.h
+        # Add more headers here
 )
 
 # Create library target

@@ -1,0 +1,56 @@
+@startuml user_flow
+skinparam sequence {
+  BackgroundColor #E8F5E9
+  FontSize 12
+  ParticipantBackgroundColor #C8E6C9
+}
+skinparam note {
+  BackgroundColor #F1F8E9
+}
+
+title UMS Library User Workflow
+
+actor "User Code" as user
+participant "UMS Core" as ums
+participant "Host PC\n(e.g. UMS Viewer)" as host
+
+== Setup Phase (once) ==
+
+user -> ums: UMS_setup()
+activate ums
+ums --> user: Ready
+deactivate ums
+
+user -> ums: UMS_register_variable(name, addr, type)
+activate ums
+note right of ums
+  Stores: name (for handshake only),
+  address pointer, type, byte size.
+  Accumulates total sample size.
+end note
+ums --> user: Registered
+deactivate ums
+
+ums -> host: Handshake packet\n[variable count | names | types | sizes]
+note right of host
+  <b>Sent once at startup</b>
+  Host now knows exact binary layout.
+  No metadata needed in samples.
+end note
+
+== Real-Time Loop ==
+
+loop Every call from main loop
+  user -> ums: UMS_update()
+  activate ums
+  ums -> ums: Read timestamp\n+ all variable values
+  ums -> host: Raw sample\n[timestamp | var bytes...]
+  ums --> user: Done
+  deactivate ums
+end
+
+note over user, host
+  <b>3 user-facing calls total.</b>
+  name/type metadata lives only in the handshake — never in samples.
+end note
+@enduml

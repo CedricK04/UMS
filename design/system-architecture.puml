@@ -1,0 +1,92 @@
+@startuml system_architecture
+skinparam component {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+  FontSize 11
+}
+skinparam package {
+  BackgroundColor #F8F9FA
+  BorderColor #90A4AE
+  FontSize 12
+}
+skinparam rectangle {
+  BackgroundColor #FFF9C4
+  BorderColor #F9A825
+}
+
+title UMS System Architecture
+
+package "User Application" {
+  [main.c / user code] as usercode
+}
+
+package "UMS Public API  (ums.h)" {
+  rectangle "Setup" {
+    [UMS_setup()] as setup
+  }
+  rectangle "Register" {
+    [UMS_register_variable(name, addr, type)] as reg
+  }
+  rectangle "Update" {
+    [UMS_update()] as upd
+  }
+}
+
+package "UMS Core  (ums_core.c)" {
+  rectangle "Variable Registry" {
+    [Variable table\n(name, ptr, type, size)] as vartable
+    [Sample size\n(calculated at register)] as samplesize
+  }
+  rectangle "Sample Engine" {
+    [Timestamp reader] as tsreader
+    [Variable memcpy loop] as memcpyloop
+    [Sample buffer] as samplebuf
+  }
+  rectangle "Handshake Builder" {
+    [Serialize variable names/types] as serialize
+    [Emit once on setup] as emit
+  }
+}
+
+package "UMS Platform HAL  (ums_hal.h)" {
+  rectangle "Transmit" {
+    [ums_hal_transmit(buf, len)] as hal_tx
+  }
+  rectangle "Timing" {
+    [ums_hal_get_timestamp()] as hal_ts
+  }
+  note right of "UMS Platform HAL  (ums_hal.h)"
+    <b>Only 2 functions to implement</b>
+    per new platform.
+  end note
+}
+
+package "Platform Implementation" {
+  rectangle "ums_stm32h7.c" {
+    [DMA + USART1 driver] as stm_dma
+    [TIM2 timestamp] as stm_tim
+  }
+  rectangle "ums_rp2040.c  (example)" {
+    [PIO + UART driver] as rp_pio
+    [SysTick timestamp] as rp_tick
+  }
+}
+
+usercode --> setup
+usercode --> reg
+usercode --> upd
+
+setup --> emit
+reg --> vartable
+reg --> samplesize
+upd --> tsreader
+upd --> memcpyloop
+memcpyloop --> samplebuf
+samplebuf --> hal_tx
+tsreader --> hal_ts
+
+hal_tx --> stm_dma
+hal_ts --> stm_tim
+hal_tx --> rp_pio
+hal_ts --> rp_tick
+@enduml

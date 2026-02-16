@@ -1,101 +1,70 @@
+//
+//
+//
+
 #ifndef UMS_CORE_H
 #define UMS_CORE_H
 
-#include <stdint.h>
-#include <stdbool.h>
+#include "ums/datatype.h"
+#include "ums/error.h"
 
-#ifdef __cplusplus
-extern "C" {
+/**
+ * Function pointer to user-defined transmit function, e.g. "HAL_UART_TRANSMIT_DMA()"
+ * Requires pointer to the data to be sent: void *data_ptr.
+ * Requires uint16_t length in bytes of what to send.
+ */
+typedef void (*transmit_function)(void *data_ptr, uint16_t length);
+
+/**
+ * Setup for UMS, requires data transmission function_ptr.
+ * @param [in] transmit_function_ptr function pointer to user-defined transmit function.
+ * @return ums_err_t error code. 1 = UMS_SUCCESS.
+ */
+ums_err_t ums_setup(transmit_function transmit_function_ptr);
+
+/**
+ * Enabling tracing for a variable, to be called for each variable the user wants to trace.
+ * @param [in] var_ptr pointer to the variable (must remain in scope).
+ * @param [in] var_name_ptr string alias for traced variable.
+ * @param [in] var_type datatype of the traced variable.
+ * @return ums_err_t error code. 1 = UMS_SUCCESS.
+ */
+ums_err_t ums_trace(void *var_ptr, char *var_name_ptr, ums_datatype_t var_type);
+
+/**
+ * Updates values of traced variables.
+ * Creates data packet including timestamp.
+ * Writes data packet to transmit buffer for automatic transmission.
+ * @return ums_err_t error code. 1= UMS_SUCCESS.
+ */
+ums_err_t ums_update(void);
+
+/**
+ * Swap the read and spare indexes for the triple buffer once a transfer was completed.
+ * To be called on transfer complete, e.g. HAL_UART_TxCpltCallback()
+ */
+void ums_transfer_complete_callback(void);
+
+/**
+ * Clean-up for UMS, to be called when exiting intended scope.
+ * @return ums_err_t error code. 1 = UMS_SUCCESS.
+ */
+ums_err_t ums_destroy(void);
+
+/**
+ * Enter critical section, default no implementation. Platform specific.
+ */
+void ums_platform_enter_critical(void);
+
+/**
+ * Exit critical section, default no implementation. Platform specific.
+ */
+void ums_platform_exit_critical(void);
+
+/**
+ * Get sample timestamp, default = 0U, should be platform specific.
+ * @return
+ */
+uint32_t ums_platform_get_timestamp(void);
+
 #endif
-
-/**
- * @brief Transmission interface callback type
- * @param pData Pointer to data buffer to transmit
- * @param length Length of data in bytes
- */
-typedef void (*TransmissionInterface)(const void *pData, uint32_t length);
-
-/**
- * @brief Critical section enter callback (disable interrupts)
- */
-typedef void (*CriticalSectionEnter)(void);
-
-/**
- * @brief Critical section exit callback (enable interrupts)
- */
-typedef void (*CriticalSectionExit)(void);
-
-/**
- * @brief Time provider callback - returns current time in microseconds
- * @return Current time in microseconds (typically from system tick/timer)
- */
-typedef uint32_t (*TimeProvider)(void);
-
-/**
- * @brief Transmission configuration structure
- */
-typedef struct {
-    TransmissionInterface transmit_fn;
-    CriticalSectionEnter enter_critical;  /* Optional: NULL for no protection */
-    CriticalSectionExit exit_critical;    /* Optional: NULL for no protection */
-    TimeProvider time_provider;           /* Optional: NULL uses simple counter */
-} ums_core_transmission_config_t;
-
-/**
- * @brief Setup UMS with transmission interface
- * 
- * @param pConfig Pointer to transmission configuration
- * @return true on success
- * @return false on failure
- */
-bool UMSSetup(const ums_core_transmission_config_t *pConfig);
-
-/**
- * @brief Add a variable to trace
- * 
- * @param pVariable Pointer to float variable to trace
- * @return true on success
- * @return false on failure (max channels reached)
- */
-bool UMSTrace(const float* pVariable);
-
-/**
- * @brief Update all traced variables and trigger transmission
- * Call this function at your desired sampling rate
- * 
- * @return true on success
- * @return false on failure
- */
-bool UMSUpdate(void);
-
-/**
- * @brief Transmission complete callback - call this from your transmission ISR/callback
- * Manages triple buffer rotation
- */
-void UMSTransmissionComplete(void);
-
-/**
- * @brief Cleanup and destroy UMS instance
- */
-void UMSDestroy(void);
-
-/**
- * @brief Get current number of traced channels
- * 
- * @return uint8_t Number of channels
- */
-uint8_t UMSGetChannelCount(void);
-
-/**
- * @brief Check if UMS is initialized
- * 
- * @return true if initialized
- * @return false if not initialized
- */
-bool UMSIsInitialized(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* UMS_CORE_H */
