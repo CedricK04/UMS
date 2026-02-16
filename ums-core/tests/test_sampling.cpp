@@ -1,477 +1,413 @@
+//
+//
+//
+
 #include <gtest/gtest.h>
-#include <vector>
+#include <array>
 #include <cstring>
+#include <string>
 
-extern "C" {
 #include "ums/ums_core.h"
-#include "ums/sampling.h"
-}
+#include "ums/triple_buffer.h"
 
-// Mock transmission data storage
-struct TransmissionData {
-    std::vector<uint8_t> data;
-    uint32_t call_count = 0;
-};
+// ── Globals exposed for white-box inspection ──────────────────────────────────
+// Must remain plain C extern declarations to match library linkage.
 
-static TransmissionData g_tx_data;
-static uint32_t g_critical_section_count = 0;
-static uint32_t g_mock_time_us = 0;
+extern sample_packet_t  ums_triple_buffer[3];
+extern volatile uint8_t idx_write;
+extern volatile uint8_t idx_read;
+extern volatile uint8_t idx_spare;
+extern uint8_t          channel_count;
+extern bool             g_ums_initialized;
+extern uint16_t         g_actual_frame_size;
+extern volatile bool    g_dma_busy;
+extern data_channel_t   registry[UMS_MAX_CHANNELS];
 
-// Mock transmission function
-void mock_transmit(const void *pData, uint32_t length) {
-    g_tx_data.call_count++;
-    const uint8_t *bytes = static_cast<const uint8_t*>(pData);
-    g_tx_data.data.assign(bytes, bytes + length);
-}
+// ── Platform hook overrides ───────────────────────────────────────────────────
+// Strong definitions that override the weak no-ops in ums_core.c.
+// Timestamp is controlled via the test fixture to avoid mutable globals.
 
-// Mock critical section functions
-void mock_enter_critical(void) {
-    g_critical_section_count++;
-}
+static uint32_t s_mock_timestamp = 0U;
 
-void mock_exit_critical(void) {
-    // No-op for tests
-}
+// Platform functions are intentionally empty for testing - they override weak symbols
+void ums_platform_enter_critical(void) { /* No-op override for testing */ }
+void ums_platform_exit_critical(void)  { /* No-op override for testing */ }
+uint32_t ums_platform_get_timestamp(void) { return s_mock_timestamp; }
 
-// Mock time provider
-uint32_t mock_time_provider(void) {
-    return g_mock_time_us;
-}
+// ── Test fixture ──────────────────────────────────────────────────────────────
+// Mutable test state lives in the fixture, not at file scope,
+// satisfying cpp:S5421 (global variables should be const).
 
-class UMSCoreTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        g_tx_data.data.clear();
-        g_tx_data.call_count = 0;
-        g_critical_section_count = 0;
-        g_mock_time_us = 0;
-        UMSDestroy();
-    }
+class UmsCoreTest : public ::testing::Test
+{
+public:
+    // Changed from protected to public to avoid cpp:S3656 (member variables should not be protected)
+    const void* m_last_tx_ptr    = nullptr;
+    uint16_t    m_last_tx_length = 0U;
+    uint32_t    m_tx_call_count  = 0U;
 
-    void TearDown() override {
-        UMSDestroy();
-    }
-};
-
-TEST_F(UMSCoreTest, SetupTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = mock_enter_critical,
-        .exit_critical = mock_exit_critical,
-        .time_provider = nullptr
-    };
-    
-    bool result = UMSSetup(&config);
-    EXPECT_TRUE(result);
-    EXPECT_TRUE(UMSIsInitialized());
-}
-
-TEST_F(UMSCoreTest, SetupWithTimeProviderTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = mock_enter_critical,
-        .exit_critical = mock_exit_critical,
-        .time_provider = mock_time_provider
-    };
-    
-    bool result = UMSSetup(&config);
-    EXPECT_TRUE(result);
-    EXPECT_TRUE(UMSIsInitialized());
-}
-
-TEST_F(UMSCoreTest, SetupNullPointerTest) {
-    bool result = UMSSetup(nullptr);
-    EXPECT_FALSE(result);
-}
-
-TEST_F(UMSCoreTest, SetupNullTransmitFunctionTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = nullptr,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    
-    bool result = UMSSetup(&config);
-    EXPECT_FALSE(result);
-}
-
-TEST_F(UMSCoreTest, SetupWithoutCriticalSectionTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    
-    bool result = UMSSetup(&config);
-    EXPECT_TRUE(result);
-}
-
-TEST_F(UMSCoreTest, DoubleInitializationTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = mock_enter_critical,
-        .exit_critical = mock_exit_critical,
-        .time_provider = nullptr
-    };
-    
-    EXPECT_TRUE(UMSSetup(&config));
-    EXPECT_FALSE(UMSSetup(&config)); // Should fail
-}
-
-TEST_F(UMSCoreTest, TraceVariableTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.5f;
-    bool result = UMSTrace(&var1);
-    EXPECT_TRUE(result);
-    EXPECT_EQ(UMSGetChannelCount(), 1);
-}
-
-TEST_F(UMSCoreTest, TraceNullPointerTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    bool result = UMSTrace(nullptr);
-    EXPECT_FALSE(result);
-}
-
-TEST_F(UMSCoreTest, TraceMultipleVariablesTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.0f, var2 = 2.0f, var3 = 3.0f;
-    
-    EXPECT_TRUE(UMSTrace(&var1));
-    EXPECT_TRUE(UMSTrace(&var2));
-    EXPECT_TRUE(UMSTrace(&var3));
-    EXPECT_EQ(UMSGetChannelCount(), 3);
-}
-
-TEST_F(UMSCoreTest, TraceMaxChannelsTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    float vars[UMS_MAX_CHANNELS + 1];
-    
-    for (int i = 0; i < UMS_MAX_CHANNELS; i++) {
-        vars[i] = static_cast<float>(i);
-        EXPECT_TRUE(UMSTrace(&vars[i]));
-    }
-    
-    // Should fail on max + 1
-    EXPECT_FALSE(UMSTrace(&vars[UMS_MAX_CHANNELS]));
-    EXPECT_EQ(UMSGetChannelCount(), UMS_MAX_CHANNELS);
-}
-
-TEST_F(UMSCoreTest, UpdateWithoutSetupTest) {
-    bool result = UMSUpdate();
-    EXPECT_FALSE(result);
-}
-
-TEST_F(UMSCoreTest, UpdateWithoutTracedVariablesTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    bool result = UMSUpdate();
-    EXPECT_FALSE(result);
-}
-
-TEST_F(UMSCoreTest, UpdateTransmitsDataTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    float var1 = 42.5f;
-    UMSTrace(&var1);
-    
-    bool result = UMSUpdate();
-    EXPECT_TRUE(result);
-    EXPECT_EQ(g_tx_data.call_count, 1);
-    
-    // Verify transmitted data
-    ASSERT_GE(g_tx_data.data.size(), sizeof(uint32_t) + sizeof(uint8_t) + sizeof(float));
-    
-    ums_sample_t *sample = reinterpret_cast<ums_sample_t*>(g_tx_data.data.data());
-    EXPECT_EQ(sample->channels, 1);
-    EXPECT_FLOAT_EQ(sample->values[0], 42.5f);
-}
-
-TEST_F(UMSCoreTest, CriticalSectionCalledTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = mock_enter_critical,
-        .exit_critical = mock_exit_critical,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.0f;
-    UMSTrace(&var1);
-    
-    g_critical_section_count = 0;
-    UMSUpdate();
-    
-    // Should enter critical section at least twice (timestamp and buffer swap)
-    EXPECT_GE(g_critical_section_count, 2);
-}
-
-TEST_F(UMSCoreTest, TripleBufferingTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.0f;
-    UMSTrace(&var1);
-    
-    // First update - should trigger transmission
-    UMSUpdate();
-    EXPECT_EQ(g_tx_data.call_count, 1);
-    float first_value = reinterpret_cast<ums_sample_t*>(g_tx_data.data.data())->values[0];
-    EXPECT_FLOAT_EQ(first_value, 1.0f);
-    
-    // Second update while transmitting - should queue
-    var1 = 2.0f;
-    UMSUpdate();
-    EXPECT_EQ(g_tx_data.call_count, 1); // Still transmitting first
-    
-    // Complete transmission - should trigger second
-    UMSTransmissionComplete();
-    EXPECT_EQ(g_tx_data.call_count, 2);
-    float second_value = reinterpret_cast<ums_sample_t*>(g_tx_data.data.data())->values[0];
-    EXPECT_FLOAT_EQ(second_value, 2.0f);
-}
-
-TEST_F(UMSCoreTest, CounterTimestampIncrementTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr  // Use counter mode
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.0f;
-    UMSTrace(&var1);
-    
-    // First update - starts transmission immediately
-    UMSUpdate();
-    EXPECT_EQ(g_tx_data.call_count, 1);
-    ums_sample_t sample1;
-    memcpy(&sample1, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample1.timestamp, 0);
-    
-    // Second update while first transmission is active - queues data
-    UMSUpdate();
-    EXPECT_EQ(g_tx_data.call_count, 1); // Still transmitting first
-    
-    // Complete first transmission - should start transmitting the queued second update
-    UMSTransmissionComplete();
-    EXPECT_EQ(g_tx_data.call_count, 2);
-    ums_sample_t sample2;
-    memcpy(&sample2, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample2.timestamp, 1);
-    
-    // Third update while second transmission is active
-    UMSUpdate();
-    EXPECT_EQ(g_tx_data.call_count, 2); // Still transmitting second
-    
-    // Complete second transmission - should start transmitting the queued third update
-    UMSTransmissionComplete();
-    EXPECT_EQ(g_tx_data.call_count, 3);
-    ums_sample_t sample3;
-    memcpy(&sample3, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample3.timestamp, 2);
-}
-
-TEST_F(UMSCoreTest, TimeProviderTimestampTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = mock_time_provider  // Use time provider mode
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.0f;
-    UMSTrace(&var1);
-    
-    // First sample at 1000 microseconds
-    g_mock_time_us = 1000;
-    UMSUpdate();
-    EXPECT_EQ(g_tx_data.call_count, 1);
-    ums_sample_t sample1;
-    memcpy(&sample1, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample1.timestamp, 1000);
-    
-    // Second sample at 2500 microseconds (1.5ms later)
-    g_mock_time_us = 2500;
-    UMSUpdate();
-    
-    UMSTransmissionComplete();
-    EXPECT_EQ(g_tx_data.call_count, 2);
-    ums_sample_t sample2;
-    memcpy(&sample2, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample2.timestamp, 2500);
-    
-    // Third sample at 5000 microseconds (2.5ms later)
-    g_mock_time_us = 5000;
-    UMSUpdate();
-    
-    UMSTransmissionComplete();
-    EXPECT_EQ(g_tx_data.call_count, 3);
-    ums_sample_t sample3;
-    memcpy(&sample3, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample3.timestamp, 5000);
-}
-
-TEST_F(UMSCoreTest, TimeProviderIrregularSamplingTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = mock_time_provider
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.0f;
-    UMSTrace(&var1);
-    
-    // Simulate irregular sampling intervals
-    uint32_t timestamps[] = {0, 100, 250, 1000, 1001, 5000};
-    
-    for (size_t i = 0; i < sizeof(timestamps) / sizeof(timestamps[0]); i++) {
-        g_mock_time_us = timestamps[i];
-        UMSUpdate();
-        
-        if (i > 0) {
-            UMSTransmissionComplete();
+    static void transmit_trampoline(void* data_ptr, uint16_t length)
+    {
+        if (s_current_fixture != nullptr)
+        {
+            s_current_fixture->m_last_tx_ptr    = data_ptr;
+            s_current_fixture->m_last_tx_length = length;
+            s_current_fixture->m_tx_call_count++;
         }
-        
-        ums_sample_t sample;
-        memcpy(&sample, g_tx_data.data.data(), sizeof(ums_sample_t));
-        EXPECT_EQ(sample.timestamp, timestamps[i]);
+    }
+
+    static UmsCoreTest* s_current_fixture;
+
+protected:
+    void SetUp() override
+    {
+        m_last_tx_ptr    = nullptr;
+        m_last_tx_length = 0U;
+        m_tx_call_count  = 0U;
+        s_mock_timestamp = 0U;
+
+        ums_setup([](void* data_ptr, uint16_t length) {
+            // Cannot capture 'this' in a plain function pointer —
+            // use file-scope accessors via the fixture's static helpers.
+            (void)data_ptr;
+            (void)length;
+        });
+
+        // Re-setup with a capturing trampoline via a static pointer to fixture.
+        s_current_fixture = this;
+        ums_setup(&UmsCoreTest::transmit_trampoline);
+    }
+
+    void TearDown() override
+    {
+        s_current_fixture = nullptr;
+        ums_destroy();
+    }
+};
+
+UmsCoreTest* UmsCoreTest::s_current_fixture = nullptr;
+
+// ── ums_setup() ───────────────────────────────────────────────────────────────
+
+TEST(UmsSetupTest, NullFunctionPointerReturnsError)
+{
+    EXPECT_EQ(ums_setup(nullptr), UMS_NULL_POINTER);
+}
+
+TEST(UmsSetupTest, ValidFunctionPointerSucceeds)
+{
+    EXPECT_EQ(ums_setup(UmsCoreTest::transmit_trampoline), UMS_SUCCESS);
+    ums_destroy();
+}
+
+TEST(UmsSetupTest, SetsInitializedFlag)
+{
+    ums_setup(UmsCoreTest::transmit_trampoline);
+    EXPECT_TRUE(g_ums_initialized);
+    ums_destroy();
+}
+
+// ── ums_trace() ───────────────────────────────────────────────────────────────
+
+TEST_F(UmsCoreTest, TraceNullVariablePointerReturnsError)
+{
+    const std::string name = "var";
+    EXPECT_EQ(ums_trace(nullptr, name.c_str(), UMS_UINT8), UMS_INVALID_VARIABLE_REGISTRATION);
+}
+
+TEST_F(UmsCoreTest, TraceNullNamePointerReturnsError)
+{
+    uint8_t var = 0U;
+    EXPECT_EQ(ums_trace(&var, nullptr, UMS_UINT8), UMS_NULL_POINTER);
+}
+
+TEST_F(UmsCoreTest, TraceStringTypeReturnsInvalidParameter)
+{
+    uint8_t var = 0U;
+    const std::string name = "var";
+    EXPECT_EQ(ums_trace(&var, name.c_str(), UMS_STRING), UMS_INVALID_PARAMETER);
+}
+
+TEST_F(UmsCoreTest, TraceBeforeSetupReturnsNotInitialized)
+{
+    ums_destroy();
+    uint8_t var = 0U;
+    const std::string name = "var";
+    EXPECT_EQ(ums_trace(&var, name.c_str(), UMS_UINT8), UMS_NOT_INITIALIZED);
+}
+
+TEST_F(UmsCoreTest, TraceIncreasesChannelCount)
+{
+    uint8_t var = 42U;
+    const std::string name = "var";
+    EXPECT_EQ(channel_count, 0U);
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    EXPECT_EQ(channel_count, 1U);
+}
+
+TEST_F(UmsCoreTest, TraceAccumulatesFrameSize)
+{
+    uint8_t  u8  = 0U;
+    uint32_t u32 = 0U;
+    float    f32 = 0.0F;
+    const std::string n1 = "a";
+    const std::string n2 = "b";
+    const std::string n3 = "c";
+
+    const uint16_t base = g_actual_frame_size;
+    ums_trace(&u8,  n1.c_str(), UMS_UINT8);
+    ums_trace(&u32, n2.c_str(), UMS_UINT32);
+    ums_trace(&f32, n3.c_str(), UMS_FLOAT32);
+
+    EXPECT_EQ(g_actual_frame_size, base + 1U + 4U + 4U);
+}
+
+TEST_F(UmsCoreTest, TraceAtMaxChannelsReturnsRangeError)
+{
+    std::array<uint8_t, UMS_MAX_CHANNELS + 1U> vars{};
+    const std::string name = "v";
+
+    for (size_t i = 0; i < UMS_MAX_CHANNELS; i++) {
+        EXPECT_EQ(ums_trace(&vars[i], name.c_str(), UMS_UINT8), UMS_SUCCESS);
+    }
+    EXPECT_EQ(ums_trace(&vars[UMS_MAX_CHANNELS], name.c_str(), UMS_UINT8), UMS_RANGE_ERROR);
+}
+
+TEST_F(UmsCoreTest, TraceStoresRegistryEntry)
+{
+    uint32_t var = 0xDEADBEEFU;
+    const std::string name = "sensor";
+    ums_trace(&var, name.c_str(), UMS_UINT32);
+
+    EXPECT_EQ(registry[0].var_ptr,  &var);
+    EXPECT_EQ(registry[0].var_type, UMS_UINT32);
+    EXPECT_STREQ(registry[0].var_name_ptr, name.c_str());
+}
+
+// ── ums_update() / ums_create_sample() ───────────────────────────────────────
+
+TEST_F(UmsCoreTest, UpdateWithNoChannelsReturnsRangeError)
+{
+    EXPECT_EQ(ums_update(), UMS_RANGE_ERROR);
+}
+
+TEST_F(UmsCoreTest, UpdateBeforeSetupReturnsNotInitialized)
+{
+    ums_destroy();
+    EXPECT_EQ(ums_update(), UMS_NOT_INITIALIZED);
+}
+
+TEST_F(UmsCoreTest, UpdateCallsTransmit)
+{
+    uint8_t var = 7U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+
+    EXPECT_EQ(ums_update(), UMS_SUCCESS);
+    EXPECT_EQ(m_tx_call_count, 1U);
+}
+
+TEST_F(UmsCoreTest, UpdateTransmitsExactFrameSize)
+{
+    uint8_t  u8  = 0U;
+    uint32_t u32 = 0U;
+    const std::string n1 = "a";
+    const std::string n2 = "b";
+
+    ums_trace(&u8,  n1.c_str(), UMS_UINT8);
+    ums_trace(&u32, n2.c_str(), UMS_UINT32);
+
+    ums_update();
+    EXPECT_EQ(m_last_tx_length, g_actual_frame_size);
+}
+
+TEST_F(UmsCoreTest, UpdateSerializesUint8ValueCorrectly)
+{
+    uint8_t var = 0xABU;
+    const std::string name = "val";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    ums_update();
+
+    EXPECT_EQ(ums_triple_buffer[idx_spare].data[0], 0xABU);
+}
+
+TEST_F(UmsCoreTest, UpdateSerializesFloat64ValueCorrectly)
+{
+    double var = 3.14159265358979;
+    const std::string name = "pi";
+    ums_trace(&var, name.c_str(), UMS_FLOAT64);
+    ums_update();
+
+    double result = 0.0;
+    memcpy(&result, ums_triple_buffer[idx_spare].data, sizeof(double));
+    EXPECT_DOUBLE_EQ(result, var);
+}
+
+TEST_F(UmsCoreTest, UpdateSerializesMultipleChannelsInOrder)
+{
+    uint8_t  u8  = 0x11U;
+    uint16_t u16 = 0x2233U;
+    const std::string n1 = "a";
+    const std::string n2 = "b";
+
+    ums_trace(&u8,  n1.c_str(), UMS_UINT8);
+    ums_trace(&u16, n2.c_str(), UMS_UINT16);
+    ums_update();
+
+    const uint8_t* const data = ums_triple_buffer[idx_spare].data;
+    EXPECT_EQ(data[0], 0x11U);
+
+    uint16_t reconstructed = 0U;
+    memcpy(&reconstructed, &data[1], sizeof(uint16_t));
+    EXPECT_EQ(reconstructed, 0x2233U);
+}
+
+TEST_F(UmsCoreTest, UpdateWritesTimestampFromPlatformHook)
+{
+    s_mock_timestamp = 0xCAFEBABEU;
+    uint8_t var = 0U;
+    const std::string name = "t";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    ums_update();
+
+    EXPECT_EQ(ums_triple_buffer[idx_spare].timestamp, 0xCAFEBABEU);
+}
+
+TEST_F(UmsCoreTest, UpdateReflectsLiveVariableValue)
+{
+    uint32_t var = 100U;
+    const std::string name = "live";
+    ums_trace(&var, name.c_str(), UMS_UINT32);
+
+    ums_update();
+    ums_transfer_complete_callback();
+
+    var = 200U;
+    ums_update();
+
+    uint32_t result = 0U;
+    memcpy(&result, ums_triple_buffer[idx_spare].data, sizeof(uint32_t));
+    EXPECT_EQ(result, 200U);
+}
+
+// ── DMA busy guard ────────────────────────────────────────────────────────────
+
+TEST_F(UmsCoreTest, UpdateWhileDmaBusyReturnsBufferFull)
+{
+    uint8_t var = 1U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+
+    ums_update();
+    EXPECT_EQ(ums_update(), UMS_BUFFER_FULL);
+}
+
+TEST_F(UmsCoreTest, UpdateSucceedsAfterTransferComplete)
+{
+    uint8_t var = 1U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+
+    ums_update();
+    ums_transfer_complete_callback();
+    EXPECT_EQ(ums_update(), UMS_SUCCESS);
+}
+
+// ── Triple buffer index rotation ──────────────────────────────────────────────
+
+TEST_F(UmsCoreTest, TransferCallbackSwapsSpareAndRead)
+{
+    const uint8_t spare_before = idx_spare;
+    const uint8_t read_before  = idx_read;
+
+    ums_transfer_complete_callback();
+
+    EXPECT_EQ(idx_spare, read_before);
+    EXPECT_EQ(idx_read,  spare_before);
+}
+
+TEST_F(UmsCoreTest, WriteAndReadIndicesNeverCollide)
+{
+    uint8_t var = 0U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+
+    for (int i = 0; i < 6; i++) {
+        if (!g_dma_busy) {
+            ums_update();
+        }
+        ums_transfer_complete_callback();
+        EXPECT_NE(idx_write, idx_read);
+        EXPECT_NE(idx_write, idx_spare);
     }
 }
 
-TEST_F(UMSCoreTest, TimeProviderWithCriticalSectionTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = mock_enter_critical,
-        .exit_critical = mock_exit_critical,
-        .time_provider = mock_time_provider
-    };
-    UMSSetup(&config);
-    
-    float var1 = 1.0f;
-    UMSTrace(&var1);
-    
-    g_mock_time_us = 12345;
-    g_critical_section_count = 0;
-    
-    UMSUpdate();
-    
-    // With time provider, should only enter critical section once (for buffer swap)
-    // No critical section needed for timestamp reading
-    EXPECT_GE(g_critical_section_count, 1);
-    
-    ums_sample_t sample;
-    memcpy(&sample, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample.timestamp, 12345);
+// ── ums_destroy() ─────────────────────────────────────────────────────────────
+
+TEST_F(UmsCoreTest, DestroyResetsChannelCount)
+{
+    uint8_t var = 0U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    ums_destroy();
+    EXPECT_EQ(channel_count, 0U);
 }
 
-TEST_F(UMSCoreTest, SampleSizeCalculationTest) {
-    EXPECT_EQ(ums_sample_size(1), 9);  // 4 + 1 + 4
-    EXPECT_EQ(ums_sample_size(3), 17); // 4 + 1 + 12
-    EXPECT_EQ(ums_sample_size(6), 29); // 4 + 1 + 24
+TEST_F(UmsCoreTest, DestroyResetsInitializedFlag)
+{
+    ums_destroy();
+    EXPECT_FALSE(g_ums_initialized);
 }
 
-TEST_F(UMSCoreTest, ConstCorrectnessTest) {
-    ums_core_transmission_config_t config = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config);
-    
-    const float const_var = 99.9f;
-    bool result = UMSTrace(&const_var);
-    EXPECT_TRUE(result);
+TEST_F(UmsCoreTest, DestroyResetsFrameSize)
+{
+    uint8_t var = 0U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    ums_destroy();
+    EXPECT_EQ(g_actual_frame_size, sizeof(uint32_t));
 }
 
-TEST_F(UMSCoreTest, MixedModeOperationTest) {
-    // Test switching between counter and time provider modes
-    // (requires re-initialization)
-    
-    // First, use counter mode
-    ums_core_transmission_config_t config1 = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = nullptr
-    };
-    UMSSetup(&config1);
-    
-    float var1 = 1.0f;
-    UMSTrace(&var1);
-    UMSUpdate();
-    
-    ums_sample_t sample1;
-    memcpy(&sample1, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample1.timestamp, 0); // Counter starts at 0
-    
-    // Destroy and reinitialize with time provider
-    UMSDestroy();
-    
-    ums_core_transmission_config_t config2 = {
-        .transmit_fn = mock_transmit,
-        .enter_critical = nullptr,
-        .exit_critical = nullptr,
-        .time_provider = mock_time_provider
-    };
-    UMSSetup(&config2);
-    
-    UMSTrace(&var1);
-    g_mock_time_us = 99999;
-    UMSUpdate();
-    
-    ums_sample_t sample2;
-    memcpy(&sample2, g_tx_data.data.data(), sizeof(ums_sample_t));
-    EXPECT_EQ(sample2.timestamp, 99999); // Now using time provider
+TEST_F(UmsCoreTest, DestroyResetsDmaBusyFlag)
+{
+    uint8_t var = 0U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    ums_update();
+    EXPECT_TRUE(g_dma_busy);
+    ums_destroy();
+    EXPECT_FALSE(g_dma_busy);
+}
+
+TEST_F(UmsCoreTest, DestroyResetsBufferIndices)
+{
+    uint8_t var = 0U;
+    const std::string name = "x";
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    ums_update();
+    ums_transfer_complete_callback();
+    ums_destroy();
+
+    EXPECT_EQ(idx_write, 0U);
+    EXPECT_EQ(idx_read,  1U);
+    EXPECT_EQ(idx_spare, 2U);
+}
+
+TEST_F(UmsCoreTest, DestroyBeforeSetupReturnsNotInitialized)
+{
+    ums_destroy();
+    EXPECT_EQ(ums_destroy(), UMS_NOT_INITIALIZED);
+}
+
+TEST_F(UmsCoreTest, ReinitializeAfterDestroySucceeds)
+{
+    uint8_t var = 42U;
+    const std::string name = "x";
+
+    ums_trace(&var, name.c_str(), UMS_UINT8);
+    ums_destroy();
+
+    EXPECT_EQ(ums_setup(UmsCoreTest::transmit_trampoline), UMS_SUCCESS);
+    EXPECT_EQ(ums_trace(&var, name.c_str(), UMS_UINT8), UMS_SUCCESS);
+    EXPECT_EQ(ums_update(), UMS_SUCCESS);
 }

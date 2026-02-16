@@ -71,7 +71,7 @@ ums_err_t ums_setup(const transmit_function transmit_function_ptr)
     return UMS_SUCCESS;
 }
 
-ums_err_t ums_trace(void *var_ptr, char *var_name_ptr, const ums_datatype_t var_type)
+ums_err_t ums_trace(void *var_ptr, const char *var_name_ptr, const ums_datatype_t var_type)
 {
     if (!g_ums_initialized)
     {

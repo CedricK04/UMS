@@ -8,6 +8,10 @@
 #include "ums/datatype.h"
 #include "ums/error.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Function pointer to user-defined transmit function, e.g. "HAL_UART_TRANSMIT_DMA()"
  * Requires pointer to the data to be sent: void *data_ptr.
@@ -29,13 +33,13 @@ ums_err_t ums_setup(transmit_function transmit_function_ptr);
  * @param [in] var_type datatype of the traced variable.
  * @return ums_err_t error code. 1 = UMS_SUCCESS.
  */
-ums_err_t ums_trace(void *var_ptr, char *var_name_ptr, ums_datatype_t var_type);
+ums_err_t ums_trace(void *var_ptr, const char *var_name_ptr, ums_datatype_t var_type);
 
 /**
  * Updates values of traced variables.
  * Creates data packet including timestamp.
  * Writes data packet to transmit buffer for automatic transmission.
- * @return ums_err_t error code. 1= UMS_SUCCESS.
+ * @return ums_err_t error code. 1 = UMS_SUCCESS.
  */
 ums_err_t ums_update(void);
 
@@ -63,8 +67,12 @@ void ums_platform_exit_critical(void);
 
 /**
  * Get sample timestamp, default = 0U, should be platform specific.
- * @return
+ * @return uint32_t timestamp value.
  */
 uint32_t ums_platform_get_timestamp(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
